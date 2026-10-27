@@ -376,8 +376,11 @@ def _get_key(
         # Then just return the current scope
         return scopes[0]
 
+    children = key.split(".")
+
     # Loop through the scopes
     for scope in scopes:
+        first_child_found = False
         try:
             # Return an empty string if falsy, with two exceptions
             # 0 should return 0, and False should return False
@@ -388,7 +391,7 @@ def _get_key(
                 scope
             )
             # For every dot separated key
-            for child in key.split("."):
+            for child_index, child in enumerate(children):
                 # Return an empty string if falsy, with two exceptions
                 # 0 should return 0, and False should return False
                 if resolved_scope in (0, False):
@@ -418,6 +421,9 @@ def _get_key(
                     )
                     raise TypeError(msg)  # noqa: TRY301
 
+                if child_index == 0:
+                    first_child_found = True
+
             try:
                 # This allows for custom falsy data types
                 # https://github.com/noahmorrison/chevron/issues/35
@@ -430,8 +436,11 @@ def _get_key(
         except (AttributeError, KeyError, IndexError, ValueError, TypeError):
             # We couldn't find the key in the current scope
             # TypeError: Attempted to traverse into non-dict/list type
-            # We'll try again on the next pass
-            pass
+            # Once the first part of a dotted name resolves, the Mustache spec
+            # requires the remaining parts to stay within that value rather than
+            # retrying the whole path against an outer scope.
+            if first_child_found and len(children) > 1:
+                break
 
     # We couldn't find the key in any of the scopes
 

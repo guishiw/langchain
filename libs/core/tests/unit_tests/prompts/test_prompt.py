@@ -261,6 +261,18 @@ def test_mustache_prompt_with_non_dict_mapping() -> None:
     assert prompt.format(user=MappingProxyType({"name": "Alice"})) == "Hello Alice"
 
 
+@pytest.mark.parametrize("inner_value", [{}, "not-a-mapping"])
+def test_mustache_dotted_name_stays_in_first_matching_scope(
+    inner_value: object,
+) -> None:
+    """A later dotted-name miss must not leak a value from an outer scope."""
+    template = "{{#a}}{{b.c}}{{/a}}"
+    prompt = PromptTemplate.from_template(template, template_format="mustache")
+
+    assert prompt.format(a={"b": inner_value}, b={"c": "LEAK"}) == ""
+    assert prompt.format(a={"other": True}, b={"c": "OUTER"}) == "OUTER"
+
+
 def test_prompt_from_template_with_partial_variables() -> None:
     """Test prompts can be constructed from a template with partial variables."""
     # given
