@@ -1,5 +1,6 @@
 """Test base chat model."""
 
+import asyncio
 import uuid
 import warnings
 from collections.abc import AsyncIterator, Iterator
@@ -10,7 +11,7 @@ from unittest.mock import patch
 
 import pytest
 from langsmith.env import get_langchain_env_var_metadata
-from pydantic import Field, model_validator
+from pydantic import Field, PrivateAttr, model_validator
 from typing_extensions import Self, override
 
 from langchain_core._api import LangChainDeprecationWarning
@@ -110,6 +111,82 @@ def test_asdict_replaces_deprecated_dict() -> None:
 
 def test_base_chat_model_type_hints_resolve() -> None:
     assert get_type_hints(BaseChatModel.asdict)["return"] == dict[str, Any]
+
+
+class _CancellationProbeModel(BaseChatModel):
+    _entered: asyncio.Event = PrivateAttr(default_factory=asyncio.Event)
+    _fast_finished: asyncio.Event = PrivateAttr(default_factory=asyncio.Event)
+    _release: asyncio.Event = PrivateAttr(default_factory=asyncio.Event)
+
+    @property
+    def _llm_type(self) -> str:
+        return "cancellation-probe"
+
+    def _generate(self, *_args: Any, **_kwargs: Any) -> ChatResult:
+        msg = "This test model only supports async generation"
+        raise AssertionError(msg)
+
+    async def _agenerate(
+        self, messages: list[BaseMessage], *_args: Any, **_kwargs: Any
+    ) -> ChatResult:
+        if messages[0].content == "fast":
+            self._fast_finished.set()
+            return ChatResult(
+                generations=[ChatGeneration(message=AIMessage(content="fast"))]
+            )
+        self._entered.set()
+        await self._release.wait()
+        return ChatResult(
+            generations=[ChatGeneration(message=AIMessage(content="done"))]
+        )
+
+
+class _CancellationRecordingCallback(BaseCallbackHandler):
+    def __init__(self) -> None:
+        self.events: list[str] = []
+
+    def on_chat_model_start(self, *_args: Any, **_kwargs: Any) -> None:
+        self.events.append("start")
+
+    def on_llm_end(self, *_args: Any, **_kwargs: Any) -> None:
+        self.events.append("end")
+
+    def on_llm_error(self, *_args: Any, **_kwargs: Any) -> None:
+        self.events.append("error")
+
+
+async def test_ainvoke_cancellation_emits_terminal_callback() -> None:
+    model = _CancellationProbeModel()
+    callback = _CancellationRecordingCallback()
+    task = asyncio.create_task(model.ainvoke("hello", config={"callbacks": [callback]}))
+
+    await asyncio.wait_for(model._entered.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=5)
+
+    assert callback.events == ["start", "error"]
+
+
+async def test_agenerate_partial_batch_cancellation_closes_each_callback() -> None:
+    model = _CancellationProbeModel()
+    callback = _CancellationRecordingCallback()
+    task = asyncio.create_task(
+        model.agenerate(
+            [[HumanMessage(content="fast")], [HumanMessage(content="slow")]],
+            callbacks=[callback],
+        )
+    )
+
+    await asyncio.wait_for(model._fast_finished.wait(), timeout=5)
+    await asyncio.wait_for(model._entered.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=5)
+
+    assert callback.events.count("start") == 2
+    assert callback.events.count("end") == 1
+    assert callback.events.count("error") == 1
 
 
 def test_invoke_preserves_deprecated_dict_override() -> None:
